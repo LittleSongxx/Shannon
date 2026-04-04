@@ -330,8 +330,6 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      playwright-service:
-        condition: service_healthy
     ports:
       - "8000:8000"
     healthcheck:
@@ -347,6 +345,7 @@ services:
     networks: [shannon-net]
 
   playwright-service:
+    profiles: [browser]
     build:
       context: ../../python/playwright-service
       dockerfile: Dockerfile

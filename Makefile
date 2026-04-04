@@ -40,9 +40,14 @@ check-env:
 	@docker compose -f $(COMPOSE_BASE)/docker-compose.yml config > /dev/null 2>&1 || true
 	@echo "Environment check complete"
 
-# Full stack
+# Full stack (without browser automation)
 dev: check-env check-protos
 	@docker compose -f $(COMPOSE_BASE)/docker-compose.yml up -d
+	@echo "Temporal UI: http://localhost:8088"
+
+# Full stack with browser automation (Playwright + Chromium, ~3.4GB)
+dev-browser: check-env check-protos
+	@docker compose -f $(COMPOSE_BASE)/docker-compose.yml --profile browser up -d
 	@echo "Temporal UI: http://localhost:8088"
 
 # Check if protobuf files are generated

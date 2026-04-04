@@ -306,8 +306,6 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      playwright-service:
-        condition: service_healthy
     ports:
       - "8000:8000"
     healthcheck:
@@ -323,6 +321,7 @@ services:
     networks: [shannon-net]
 
   playwright-service:
+    profiles: [browser]
     image: waylandzhang/playwright-service:${SHANNON_VERSION:-latest}
     restart: unless-stopped
     environment:

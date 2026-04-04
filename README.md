@@ -328,6 +328,25 @@ make logs     # View service logs
 make down     # Stop all services
 ```
 
+### Browser Automation (Optional)
+
+The Playwright service enables browser automation workflows (3.4GB image with Chromium). It is **not started by default**. To enable it:
+
+```bash
+# Development
+docker compose -f deploy/compose/docker-compose.yml --profile browser up -d
+
+# Pre-built images
+docker compose -f deploy/compose/docker-compose.release.yml --profile browser up -d
+```
+
+Test it with:
+```bash
+curl -X POST http://localhost:8080/api/v1/tasks \
+  -H "Content-Type: application/json" \
+  -d '{"query":"Go to https://waylandz.com and get the page title","session_id":"test","context":{"role":"browser_use"}}'
+```
+
 ### Using Pre-built Images
 
 ```bash
