@@ -1,14 +1,13 @@
 # Shannon Python SDK - Packaging Guide
 
-**Version:** 0.1.0a1
-**Status:** ✅ Ready for TestPyPI/PyPI
+**Version:** 0.7.0
 
 ---
 
 ## Package Information
 
 - **Name:** `shannon-sdk`
-- **Version:** `0.1.0a1` (PEP 440 pre-release)
+- **Version:** `0.7.0`
 - **Size:** ~38KB wheel, ~32KB source
 - **Python:** >=3.9
 - **License:** MIT
@@ -27,7 +26,7 @@ make build
 make publish-test
 
 # 3. Test install
-pip install -i https://test.pypi.org/simple/ shannon-sdk==0.1.0a1
+pip install -i https://test.pypi.org/simple/ shannon-sdk==0.7.0
 ```
 
 ### Production PyPI
@@ -51,41 +50,37 @@ pip install -e ".[dev]"
 pip install build twine
 ```
 
-### 1. Generate Proto Stubs
-
-**IMPORTANT:** Always run before building!
-
-```bash
-make proto
-```
-
-This generates Python stubs from `.proto` files in `src/shannon/generated/`.
-
-### 2. Run Tests
+### 1. Run Tests
 
 ```bash
 make test
 # Should pass with >30% coverage
 ```
 
-### 3. Build Distribution
+Live validation is opt-in:
+
+```bash
+make test-live
+```
+
+### 2. Build Distribution
 
 ```bash
 make build
 ```
 
 **Output:**
-- `dist/shannon_sdk-0.1.0a1.tar.gz` (source distribution)
-- `dist/shannon_sdk-0.1.0a1-py3-none-any.whl` (wheel)
+- `dist/shannon_sdk-0.7.0.tar.gz` (source distribution)
+- `dist/shannon_sdk-0.7.0-py3-none-any.whl` (wheel)
 
-### 4. Verify Package
+### 3. Verify Package
 
 ```bash
 # Check package metadata
 python3 -m twine check dist/*
 
 # Inspect contents
-tar -tzf dist/shannon_sdk-0.1.0a1.tar.gz | head -20
+tar -tzf dist/shannon_sdk-0.7.0.tar.gz | head -20
 ```
 
 **Expected:**
@@ -95,7 +90,7 @@ tar -tzf dist/shannon_sdk-0.1.0a1.tar.gz | head -20
 - ✅ No test files
 - ✅ No development files
 
-### 5. Upload to TestPyPI
+### 4. Upload to TestPyPI
 
 ```bash
 # Upload
@@ -104,13 +99,13 @@ python3 -m twine upload -r testpypi dist/*
 # Test install in clean environment
 python3 -m venv test-env
 source test-env/bin/activate
-pip install -i https://test.pypi.org/simple/ shannon-sdk==0.1.0a1
+pip install -i https://test.pypi.org/simple/ shannon-sdk==0.7.0
 
 # Verify
 python3 -c "from shannon import ShannonClient; print('✓ Import works')"
 ```
 
-### 6. Upload to PyPI (Production)
+### 5. Upload to PyPI (Production)
 
 ```bash
 # Final checks
@@ -132,7 +127,7 @@ python3 -m twine upload dist/*
 ### Included
 
 ```
-shannon_sdk-0.1.0a1/
+shannon_sdk-0.7.0/
 ├── README.md                    # User documentation
 ├── pyproject.toml               # Package metadata
 ├── src/shannon/
@@ -141,7 +136,7 @@ shannon_sdk-0.1.0a1/
 │   ├── models.py               # Data models
 │   ├── errors.py               # Exceptions
 │   ├── cli.py                  # CLI tool
-│   └── generated/              # Proto stubs (17 files)
+│   └── generated/              # Checked-in generated stubs
 │       ├── common/
 │       ├── orchestrator/
 │       └── session/
@@ -200,7 +195,7 @@ pip install shannon-sdk
 ### From TestPyPI
 
 ```bash
-pip install -i https://test.pypi.org/simple/ shannon-sdk==0.1.0a1
+pip install -i https://test.pypi.org/simple/ shannon-sdk==0.7.0
 ```
 
 ### From Source
@@ -208,7 +203,6 @@ pip install -i https://test.pypi.org/simple/ shannon-sdk==0.1.0a1
 ```bash
 git clone https://github.com/Kocoro-lab/Shannon.git
 cd Shannon/clients/python
-make proto
 pip install -e .
 ```
 
@@ -216,36 +210,35 @@ pip install -e .
 
 ## Version Bumping
 
-### For next alpha release (0.1.0a2)
+### When a release is planned
 
 ```bash
 # Edit pyproject.toml
-version = "0.1.0a2"
+version = "0.6.1"
 
 # Clean, rebuild
 make clean
-make proto
 make build
 make publish-test
 ```
 
-### For beta release (0.1.0b1)
+### Example minor release
 
 ```bash
-version = "0.1.0b1"
+version = "0.7.0"
 ```
 
-### For production release (0.1.0)
+### Example stable release
 
 ```bash
-version = "0.1.0"
+version = "1.0.0"
 ```
 
 **PEP 440 versioning:**
-- `0.1.0a1` - Alpha 1
-- `0.1.0b1` - Beta 1
-- `0.1.0rc1` - Release candidate 1
-- `0.1.0` - Stable release
+- `0.7.0a1` - Alpha 1
+- `0.7.0b1` - Beta 1
+- `0.7.0rc1` - Release candidate 1
+- `1.0.0` - Stable release
 
 ---
 
@@ -254,8 +247,7 @@ version = "0.1.0"
 ### "No proto stubs in package"
 
 ```bash
-# Run proto generation before build
-make proto
+# Ensure checked-in generated stubs are present before build
 make build
 ```
 
@@ -296,8 +288,8 @@ python3 -m twine upload --verbose -r testpypi dist/*
 ## Makefile Reference
 
 ```bash
-make proto         # Generate proto stubs
 make test          # Run tests with coverage
+make test-live     # Run live validation tests
 make build         # Build distribution packages
 make publish-test  # Upload to TestPyPI
 make publish       # Upload to PyPI (with confirmation)
@@ -309,7 +301,7 @@ make clean         # Remove build artifacts
 ## Checklist Before Publishing
 
 - [ ] All tests passing (`make test`)
-- [ ] Proto stubs generated (`make proto`)
+- [ ] Live validation run when needed (`make test-live`)
 - [ ] Version bumped in `pyproject.toml`
 - [ ] README.md updated
 - [ ] Built packages (`make build`)
@@ -322,14 +314,11 @@ make clean         # Remove build artifacts
 
 ## Current Status
 
-✅ **v0.1.0a1 ready for TestPyPI**
+**v0.7.0** — Published to PyPI.
 
 **Package validated:**
 - [x] Builds successfully
 - [x] Twine check passes
-- [x] Only README.md included
-- [x] All proto stubs included
-- [x] No test files included
-- [x] Correct version (0.1.0a1)
-
-**Next step:** Upload to TestPyPI with `make publish-test`
+- [x] 62 unit tests pass, 48 E2E tests pass
+- [x] Security reviewed (no cloud leaks, no secrets)
+- [x] Version aligned to 0.7.0 across all metadata
