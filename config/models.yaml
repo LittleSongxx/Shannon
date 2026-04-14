@@ -88,11 +88,11 @@ model_tiers:
     # Target allocation: 10% (not enforced - actual usage depends on complexity)
     # Heavy thinking/reasoning models for complex tasks
     providers:
-      - provider: anthropic
-        model: claude-opus-4-6
-        priority: 1
       - provider: openai
         model: gpt-5.1
+        priority: 1
+      - provider: anthropic
+        model: claude-opus-4-6
         priority: 2
       - provider: anthropic
         model: claude-opus-4-5-20251101
