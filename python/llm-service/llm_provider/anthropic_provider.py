@@ -7,6 +7,7 @@ import json
 import os
 import logging
 import time
+from collections import OrderedDict
 from typing import Dict, List, Any, AsyncIterator, Optional
 import anthropic
 from anthropic import AsyncAnthropic
@@ -78,12 +79,142 @@ def _record_cache_metrics(
 CACHE_BREAK_MARKER = "<!-- cache_break -->"
 VOLATILE_MARKER = "<!-- volatile -->"
 
-# Anthropic prompt cache TTL. 1h reduces re-creation cost for long-running
-# workflows (swarm 10-30min, research 5-15min). Write premium is 2x (vs 1.25x
-# for 5min) but amortized over 12x longer TTL — net positive from ~3 calls.
-# Ordering: system(1h) ≥ tools(1h) ≥ messages(1h) — monotonic non-increasing ✓
+# Anthropic prompt cache TTL blocks.
+# 1h: write premium 2x, break-even when cache_read amortizes across >=3 calls
+# 5m: write premium 1.25x, break-even from 1 read — correct for one-shot paths
+# Ordering across breakpoints: system >= tools >= messages — monotonic non-increasing.
+# Which TTL applies per call is resolved by `_ttl_block(request)` based on cache_source.
 CACHE_TTL_LONG = {"type": "ephemeral", "ttl": "1h"}
 CACHE_TTL_SHORT = {"type": "ephemeral"}
+
+# Sources that amortize across many turns → worth the 1h write premium.
+# Human-conversation channels where idle > 5m is common. Keep in sync with
+# docs/cache-strategy.md. Unknown/unset → treated as short (fail cheap).
+_LONG_CACHE_SOURCES = frozenset({
+    "slack", "line", "feishu", "lark", "telegram",
+    "tui", "oneshot_interactive", "cache_bench",
+})
+
+
+def _ttl_block(request) -> Optional[Dict[str, str]]:
+    """Resolve the cache_control block to apply for this request, or None
+    to suppress prompt-cache writes entirely.
+
+    Precedence:
+      1. SHANNON_FORCE_TTL env (off / 5m / 1h) — operator escape hatch
+      2. request.cache_source → _LONG_CACHE_SOURCES map → 1h
+      3. Fallback → 5m  (short is the safe default: cron/webhook/mcp/one-shot
+         and all internal subagent paths pay 1.25x instead of 2x premium when
+         the cache will never be re-read)
+
+    Note: request.cache_ttl is NOT consulted here — that field drives
+    manager.py's response-cache TTL, a different layer. If a caller needs
+    explicit per-call prompt-cache control, use SHANNON_FORCE_TTL.
+    """
+    force = os.environ.get("SHANNON_FORCE_TTL", "").strip().lower()
+    if force == "off":
+        return None
+    if force == "5m":
+        return CACHE_TTL_SHORT
+    if force == "1h":
+        return CACHE_TTL_LONG
+
+    src = (getattr(request, "cache_source", None) or "").strip().lower()
+    if src in _LONG_CACHE_SOURCES:
+        return CACHE_TTL_LONG
+    return CACHE_TTL_SHORT
+
+
+# Per-session memo of the last applied rolling marker hash.
+# Why: Anthropic prefix cache only matches at positions with explicit
+# cache_control. Without remembering last turn's marker, the new turn's
+# rolling marker writes a fresh block while the previous block becomes
+# unreachable — long-session CER drops from 16.85x (3-turn) to 2.35x
+# (30-turn). Preserving prev marker keeps both writes readable.
+_PREV_ROLLING_MAX = 1000
+_prev_rolling = OrderedDict()  # session_id → marker hash; LRU evicted
+
+
+def _msg_stable_hash(msg: Dict[str, Any]) -> str:
+    """Semantic hash of a claude_message for cross-turn marker matching.
+
+    Why semantic instead of full JSON: clients re-serialize messages between
+    turns with structural variations (content as str vs [{"type":"text",...}],
+    optional fields present/absent, dict ordering). A pure JSON hash drifts
+    even when the underlying message is "the same one." This hash extracts
+    just (role, semantic content) — invariant to those representation shifts.
+
+    Includes tool_use IDs and tool_result tool_use_ids since those are stable
+    Anthropic-generated identifiers that uniquely tag a turn's content.
+    """
+    try:
+        role = msg.get("role", "")
+        sig = _semantic_signature(msg.get("content", ""))
+        return hashlib.sha1((role + "|" + sig).encode("utf-8")).hexdigest()[:16]
+    except Exception:
+        return ""
+
+
+def _semantic_signature(content: Any) -> str:
+    """Build a normalized string signature of a message's content.
+    String content -> raw text. List content -> "T:text" / "U:tool_use_id" /
+    "R:tool_result_id:text" tokens joined by newline. Excludes cache_control,
+    type field shape, and other structural noise.
+    """
+    if isinstance(content, str):
+        return "S:" + content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if not isinstance(b, dict):
+                continue
+            btype = b.get("type", "")
+            if btype == "text":
+                parts.append("T:" + str(b.get("text", "")))
+            elif btype == "tool_use":
+                # Tool use ID is stable across turns (Anthropic-assigned)
+                parts.append("U:" + str(b.get("id", "")))
+            elif btype == "tool_result":
+                tid = str(b.get("tool_use_id", ""))
+                tc = b.get("content", "")
+                tc_str = tc if isinstance(tc, str) else json.dumps(tc, sort_keys=True, default=str)
+                parts.append("R:" + tid + ":" + tc_str)
+            elif btype in ("image", "document"):
+                # Hash by source URL/data presence; ignore noise like media_type ordering
+                src = b.get("source", {}) if isinstance(b.get("source"), dict) else {}
+                parts.append(btype[0].upper() + ":" + str(src.get("url") or src.get("data", ""))[:64])
+            else:
+                # Unknown block: hash whole thing (rare; keep stable as best we can)
+                parts.append("X:" + json.dumps(b, sort_keys=True, default=str))
+        return "\n".join(parts)
+    # Fallback for unexpected shapes
+    return "F:" + json.dumps(content, sort_keys=True, default=str)
+
+
+def _strip_cache_control_for_hash(obj: Any) -> Any:
+    """Return a deep copy of obj with all `cache_control` keys removed.
+    Kept for backward-compat / debugging only — _msg_stable_hash no longer uses it."""
+    if isinstance(obj, dict):
+        return {k: _strip_cache_control_for_hash(v) for k, v in obj.items() if k != "cache_control"}
+    if isinstance(obj, list):
+        return [_strip_cache_control_for_hash(item) for item in obj]
+    return obj
+
+
+def _remember_marker(session_id: str, msg_hash: str) -> None:
+    if not session_id or not msg_hash:
+        return
+    if session_id in _prev_rolling:
+        _prev_rolling.move_to_end(session_id)
+    _prev_rolling[session_id] = msg_hash
+    while len(_prev_rolling) > _PREV_ROLLING_MAX:
+        _prev_rolling.popitem(last=False)
+
+
+def _recall_marker(session_id: str) -> Optional[str]:
+    if not session_id:
+        return None
+    return _prev_rolling.get(session_id)
 
 
 def _build_beta_header(
@@ -213,9 +344,18 @@ class AnthropicProvider(LLMProvider):
         return TokenCounter.count_messages_tokens(messages, model)
 
     def _convert_messages_to_claude_format(
-        self, messages: List[Dict[str, Any]]
+        self,
+        messages: List[Dict[str, Any]],
+        ttl_block: Optional[Dict[str, str]] = CACHE_TTL_LONG,
     ) -> tuple[str, List[Dict]]:
-        """Convert OpenAI-style messages to Claude format"""
+        """Convert OpenAI-style messages to Claude format.
+
+        ttl_block: the cache_control dict to apply at cache_break positions and
+        the rolling [-2] marker. Explicit ``None`` suppresses prompt-cache writes
+        entirely (used when ``SHANNON_FORCE_TTL=off``). Default ``CACHE_TTL_LONG``
+        preserves legacy behavior for callers that invoke this helper directly
+        (e.g. unit tests) without going through ``_build_api_request``.
+        """
         system_message = ""
         claude_messages = []
 
@@ -232,10 +372,13 @@ class AnthropicProvider(LLMProvider):
                     raw_stable = parts[0]
                     volatile = parts[1]
                     if raw_stable.strip():
+                        stable_block: Dict[str, Any] = {"type": "text", "text": raw_stable}
+                        if ttl_block is not None:
+                            stable_block["cache_control"] = ttl_block
                         claude_messages.append({
                             "role": "user",
                             "content": [
-                                {"type": "text", "text": raw_stable, "cache_control": CACHE_TTL_LONG},
+                                stable_block,
                                 {"type": "text", "text": volatile},
                             ]
                         })
@@ -320,54 +463,131 @@ class AnthropicProvider(LLMProvider):
                     {"role": "user", "content": f"Function result: {content}"}
                 )
 
-        # Rolling message-level cache_control: attach to the last block of the
-        # penultimate message. This mirrors Claude Code's per-turn advancing
-        # breakpoint (claude-code-source/src/services/api/claude.ts:3078-3106).
-        # We use length-2 instead of length-1 because ShanClaw packs volatile
-        # context (date, memory, CWD) into the current turn's last user
-        # message; -2 is the last fully-stable turn boundary.
-        #
-        # De-duplication: if the target message already has cache_control on
-        # any block (e.g. user_1 with cache_break marker), skip to respect the
-        # Anthropic 4-breakpoint cap (system + tools + user_stable + rolling).
-        if len(claude_messages) >= 2:
-            target = claude_messages[-2]
-            content = target["content"]
-            if isinstance(content, str):
-                # Promote to blocks so we can attach cache_control
-                target["content"] = [
-                    {"type": "text", "text": content, "cache_control": CACHE_TTL_LONG},
-                ]
-            elif isinstance(content, list) and content:
-                already_marked = any(
-                    isinstance(b, dict) and b.get("cache_control") for b in content
-                )
-                if not already_marked:
-                    last_block = content[-1]
-                    if isinstance(last_block, dict):
-                        last_block["cache_control"] = CACHE_TTL_LONG
-
+        # Basic rolling marker on [-2] (no prev-turn preservation here because
+        # session_id isn't available at this layer). _build_api_request calls
+        # _apply_rolling_cache_marker afterwards to add prev preservation when
+        # a session_id is available; that call is idempotent on this marker.
+        if len(claude_messages) >= 2 and ttl_block is not None:
+            self._mark_last_block(claude_messages[-2], ttl_block)
         return system_message, claude_messages
 
-    def _split_system_message(self, system_message: str) -> list[dict]:
+    @staticmethod
+    def _mark_last_block(msg: Dict[str, Any], ttl_block: Dict[str, str]) -> bool:
+        """Add cache_control to the last block of msg. Returns True if applied.
+        No-op if any block already has cache_control (de-dup)."""
+        content = msg.get("content")
+        if isinstance(content, str):
+            msg["content"] = [{"type": "text", "text": content, "cache_control": ttl_block}]
+            return True
+        if isinstance(content, list) and content:
+            already = any(isinstance(b, dict) and b.get("cache_control") for b in content)
+            if already:
+                return False
+            last_block = content[-1]
+            if isinstance(last_block, dict):
+                last_block["cache_control"] = ttl_block
+                return True
+        return False
+
+    @staticmethod
+    def _strip_message_cache_control(msg: Dict[str, Any]) -> None:
+        """Remove cache_control from all blocks in msg (used to free a breakpoint
+        slot when promoting prev_rolling marker — user_1's bytes remain readable
+        as part of prev_rolling's larger cached prefix, no info loss)."""
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    block.pop("cache_control", None)
+
+    def _apply_rolling_cache_marker(
+        self,
+        claude_messages: List[Dict[str, Any]],
+        session_id: Optional[str],
+        ttl_block: Optional[Dict[str, str]] = CACHE_TTL_LONG,
+    ) -> None:
+        """Apply rolling cache_control marker on penultimate message; when a
+        previous turn's marker is still present in messages, also preserve it.
+
+        Why preserve prev marker: Anthropic prefix cache only matches at positions
+        with explicit cache_control. Without preserving prev marker, every turn
+        rewrites a fresh rolling block while the previous rolling cache becomes
+        unreachable. Long-session bench observed CHR 86%->68%, CER 16.85x->2.35x.
+
+        Breakpoint accounting (Anthropic cap = 4):
+        - Always: system (1) + tools (1) = 2 reserved
+        - Without prev_rolling: user_1 (cache_break) + rolling@-2 = 4 ✓
+        - With prev_rolling preserved: prev_rolling + rolling@-2 = 4
+          (user_1's cache_control stripped — its bytes are inside prev_rolling's
+          cached prefix, readable for free without an extra breakpoint)
+        """
+        if ttl_block is None:
+            return
+        if len(claude_messages) < 2:
+            return
+
+        target_idx = len(claude_messages) - 2
+        target = claude_messages[target_idx]
+
+        # Locate prev marker by hash (None if first turn or compaction event).
+        prev_idx: Optional[int] = None
+        if session_id:
+            prev_hash = _recall_marker(session_id)
+            if prev_hash:
+                for i, msg in enumerate(claude_messages[:target_idx]):
+                    if _msg_stable_hash(msg) == prev_hash:
+                        prev_idx = i
+                        break
+
+        # Apply current rolling marker on [-2] (existing behavior).
+        self._mark_last_block(target, ttl_block)
+
+        # Preserve prev marker: free a breakpoint by stripping earlier
+        # cache_control (user_1), then mark the prev message.
+        if prev_idx is not None and prev_idx < target_idx:
+            for i in range(prev_idx):
+                self._strip_message_cache_control(claude_messages[i])
+            self._mark_last_block(claude_messages[prev_idx], ttl_block)
+            logger.debug(
+                "rolling cache: preserved prev marker at idx=%d (target=%d, session=%s)",
+                prev_idx, target_idx, (session_id or "")[:12],
+            )
+
+        # Memo current target hash for next turn's lookup.
+        if session_id:
+            _remember_marker(session_id, _msg_stable_hash(target))
+
+    def _split_system_message(
+        self,
+        system_message: str,
+        ttl_block: Optional[Dict[str, str]] = CACHE_TTL_LONG,
+    ) -> list[dict]:
         """Split system message at <!-- volatile --> marker.
 
         Returns a list of content blocks for the Anthropic API 'system' parameter.
-        The stable prefix (before marker) gets cache_control; volatile suffix does not.
-        If no marker is present, returns a single cached block (backward compatible).
+        The stable prefix (before marker) gets cache_control if ttl_block is
+        provided; volatile suffix never does. If no marker is present, returns
+        a single (cached iff ttl_block is non-None) block.
+
+        Monotonic TTL ordering across breakpoints is preserved because all
+        cache_control blocks in a single request share the same ttl_block.
         """
         if VOLATILE_MARKER in system_message:
             stable, volatile = system_message.split(VOLATILE_MARKER, 1)
-            # 1h TTL: system(1h) ≥ tools(1h) ≥ messages(1h) — monotonic ✓
-            # (SDK 0.64.0 required for 1h TTL support)
-            blocks = []
+            blocks: list[dict] = []
             if stable.strip():
-                blocks.append({"type": "text", "text": stable.strip(), "cache_control": CACHE_TTL_LONG})
+                stable_block: Dict[str, Any] = {"type": "text", "text": stable.strip()}
+                if ttl_block is not None:
+                    stable_block["cache_control"] = ttl_block
+                blocks.append(stable_block)
             if volatile.strip():
                 blocks.append({"type": "text", "text": volatile.strip()})
             if blocks:
                 return blocks
-        return [{"type": "text", "text": system_message, "cache_control": CACHE_TTL_LONG}]
+        full_block: Dict[str, Any] = {"type": "text", "text": system_message}
+        if ttl_block is not None:
+            full_block["cache_control"] = ttl_block
+        return [full_block]
 
     def _convert_functions_to_tools(self, functions: List[Dict]) -> List[Dict]:
         """Convert OpenAI function format to Claude tools format.
@@ -493,13 +713,38 @@ class AnthropicProvider(LLMProvider):
         """
         model = model_config.model_id
 
+        # Resolve prompt-cache TTL once for the whole request. All cache_control
+        # blocks below share this single value to keep Anthropic's monotonic
+        # TTL-ordering invariant (system >= tools >= messages) trivially satisfied.
+        ttl_block = _ttl_block(request)
+
         # Convert messages to Claude format
         system_message, claude_messages = self._convert_messages_to_claude_format(
-            request.messages
+            request.messages, ttl_block
         )
 
         # Convert shannon_attachment blocks to Anthropic-native format
         claude_messages = self._convert_attachments_for_anthropic(claude_messages)
+
+        # Rolling cache_control marker on [-2] is applied inside
+        # _convert_messages_to_claude_format. Cross-turn prev_marker
+        # preservation (_apply_rolling_cache_marker) is intentionally NOT
+        # called here. Empirically (bench 2026-04-15 Phase 3 attempt):
+        # re-enabling it regressed 30-turn CHR from 93% → 61% and CER
+        # 15.6x → 4.0x, tripling uncached input tokens. Root cause: the
+        # preservation path calls _strip_message_cache_control on user_1 to
+        # free a breakpoint slot, but stripping cache_control mutates the
+        # block's byte representation on the wire. Even though the
+        # non-cache_control content is identical, Anthropic's prefix match
+        # appears to break at that boundary — so the "free" cached prefix
+        # up to msg[prev_idx] no longer matches, and every turn falls back
+        # to writing fresh cache. Single rolling marker on [-2] (applied by
+        # _convert_messages_to_claude_format already) gives us the observed
+        # 93% CHR / 15.6x CER on 30-turn sessions, which is optimal under
+        # the public API's 4-breakpoint cap. To revive prev_marker safely,
+        # we'd need either an Anthropic API change (treat cache_control as
+        # cache-key-insensitive) or a byte-rewriting scheme that preserves
+        # exact bytes while freeing a slot — neither is available today.
 
         # Compute safe max_tokens based on context window headroom (OpenAI-style)
         prompt_tokens_est = self.count_tokens(request.messages, model)
@@ -549,7 +794,7 @@ class AnthropicProvider(LLMProvider):
         # If neither is set, omit both and let the API defaults apply.
 
         if system_message:
-            api_request["system"] = self._split_system_message(system_message)
+            api_request["system"] = self._split_system_message(system_message, ttl_block)
 
         if request.stop:
             api_request["stop_sequences"] = request.stop
@@ -557,8 +802,8 @@ class AnthropicProvider(LLMProvider):
         # Handle functions/tools
         if request.functions and model_config.supports_functions:
             tools = self._convert_functions_to_tools(request.functions)
-            if tools:
-                tools[-1]["cache_control"] = CACHE_TTL_LONG
+            if tools and ttl_block is not None:
+                tools[-1]["cache_control"] = ttl_block
             api_request["tools"] = tools
 
             # Handle function calling / tool_choice

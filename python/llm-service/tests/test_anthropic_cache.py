@@ -58,7 +58,11 @@ class TestMultiTurnCacheBreakpoints:
                         f"non-penultimate assistant content should remain plain string, got {msg['content']!r}"
 
     def test_system_message_always_gets_cache_control(self):
-        """System message gets cache_control in _build_api_request."""
+        """System message gets cache_control in _build_api_request.
+
+        Uses cache_source='tui' to land in the long-TTL bucket — under the
+        source-routed policy, unlabeled requests fall back to 5m (fail cheap).
+        """
         provider = self._make_provider()
         from llm_provider.base import CompletionRequest
         request = CompletionRequest(
@@ -68,6 +72,7 @@ class TestMultiTurnCacheBreakpoints:
             ],
             temperature=0.3,
             max_tokens=100,
+            cache_source="tui",
         )
         model_config = type("MC", (), {
             "model_id": "claude-haiku-4-5-20251001",
@@ -599,6 +604,157 @@ class TestRollingMessageBreakpoint:
         assert isinstance(penultimate["content"], list)
         # The rolling marker sits on the LAST block of penultimate, regardless of block type.
         assert penultimate["content"][-1].get("cache_control") is not None
+
+
+class TestPrevRollingPreservation:
+    """Verify cross-turn preservation of the previous rolling cache_control marker.
+
+    Rationale: Anthropic prefix cache only matches at positions with explicit
+    cache_control. Without preserving prev marker, every turn rewrites a fresh
+    rolling block while the previous block becomes unreachable. Long-session
+    bench (30-turn): CHR 86%->68%, CER 16.85x->2.35x. Preserving prev marker
+    closes the gap.
+    """
+
+    def _make_provider(self):
+        return AnthropicProvider(_MINIMAL_CONFIG)
+
+    def _convert_and_apply(self, provider, messages, session_id):
+        _, msgs = provider._convert_messages_to_claude_format(messages)
+        provider._apply_rolling_cache_marker(msgs, session_id)
+        return msgs
+
+    def test_first_turn_no_prev_marker_preserved(self):
+        """First turn for a session: only [-2] gets rolling marker, no prev to preserve."""
+        from llm_provider import anthropic_provider as ap
+        ap._prev_rolling.clear()  # isolate test
+        provider = self._make_provider()
+        messages = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "reply_1"},
+            {"role": "user", "content": "second"},
+        ]
+        msgs = self._convert_and_apply(provider, messages, "session-a")
+        # Penultimate (assistant reply_1) marked
+        assert msgs[-2]["content"][-1].get("cache_control") is not None
+        # First user message NOT marked (no cache_break, no preservation needed)
+        first_content = msgs[0]["content"]
+        if isinstance(first_content, list):
+            assert all(not b.get("cache_control") for b in first_content if isinstance(b, dict))
+
+    def test_second_turn_preserves_prev_marker(self):
+        """Second turn for same session: prev rolling marker (now in middle) is preserved."""
+        from llm_provider import anthropic_provider as ap
+        ap._prev_rolling.clear()
+        provider = self._make_provider()
+        sid = "session-b"
+        # Turn 1: assistant reply_1 becomes the rolling target
+        turn1 = [
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "reply_1"},
+            {"role": "user", "content": "u2"},
+        ]
+        self._convert_and_apply(provider, turn1, sid)
+        # Memo should now have session-b -> hash of (the marked assistant reply_1)
+        assert sid in ap._prev_rolling
+
+        # Turn 2: conversation grew; the OLD penultimate (reply_1) is now at idx 1.
+        # New rolling target is now reply_2 at idx 3.
+        turn2 = [
+            {"role": "user", "content": "u1"},
+            # reply_1 with the cache_control we set in turn 1 — must be preserved
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "reply_1", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+            ]},
+            {"role": "user", "content": "u2"},
+            {"role": "assistant", "content": "reply_2"},
+            {"role": "user", "content": "u3"},
+        ]
+        msgs = self._convert_and_apply(provider, turn2, sid)
+        # New rolling target: reply_2 at idx 3
+        assert msgs[3]["content"][-1].get("cache_control") is not None
+        # Prev marker preserved at idx 1 (reply_1)
+        assert msgs[1]["content"][-1].get("cache_control") is not None
+        # Memo updated to current target hash
+        assert ap._prev_rolling[sid] != ""
+
+    def test_cache_break_user_stripped_when_prev_preserved(self):
+        """When prev marker is preserved, user_1's cache_break cache_control is stripped
+        to free a breakpoint slot. user_1's bytes remain readable as part of
+        prev_rolling's cached prefix — no info loss."""
+        from llm_provider import anthropic_provider as ap
+        ap._prev_rolling.clear()
+        provider = self._make_provider()
+        sid = "session-c"
+        # Turn 1: establish a prev marker
+        turn1 = [
+            {"role": "user", "content": "stable_block<!-- cache_break -->volatile"},
+            {"role": "assistant", "content": "reply_1"},
+            {"role": "user", "content": "u2"},
+        ]
+        self._convert_and_apply(provider, turn1, sid)
+
+        # Turn 2: same session, with the marked reply_1 still in messages
+        turn2 = [
+            {"role": "user", "content": "stable_block<!-- cache_break -->volatile"},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "reply_1", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
+            ]},
+            {"role": "user", "content": "u2"},
+            {"role": "assistant", "content": "reply_2"},
+            {"role": "user", "content": "u3"},
+        ]
+        msgs = self._convert_and_apply(provider, turn2, sid)
+        # user_1 (idx 0) cache_break cache_control should be stripped to make room
+        first_content = msgs[0]["content"]
+        if isinstance(first_content, list):
+            for b in first_content:
+                if isinstance(b, dict):
+                    assert b.get("cache_control") is None, \
+                        "user_1's cache_control should be stripped when prev marker is preserved"
+        # prev_rolling marker (reply_1, idx 1) preserved
+        assert msgs[1]["content"][-1].get("cache_control") is not None
+        # Current rolling marker (reply_2, idx 3) applied
+        assert msgs[3]["content"][-1].get("cache_control") is not None
+
+    def test_no_session_id_falls_back_to_basic_marker(self):
+        """Without session_id, no prev preservation; just basic rolling marker on [-2]."""
+        from llm_provider import anthropic_provider as ap
+        before_size = len(ap._prev_rolling)
+        provider = self._make_provider()
+        messages = [
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "r1"},
+            {"role": "user", "content": "u2"},
+        ]
+        msgs = self._convert_and_apply(provider, messages, None)
+        assert msgs[-2]["content"][-1].get("cache_control") is not None
+        # Memo unchanged when session_id is None
+        assert len(ap._prev_rolling) == before_size
+
+    def test_compaction_drops_prev_marker_gracefully(self):
+        """If ShapeHistory removed the prev marker's message, fall back to basic
+        marker (no error, just degraded behavior on that single turn)."""
+        from llm_provider import anthropic_provider as ap
+        ap._prev_rolling.clear()
+        provider = self._make_provider()
+        sid = "session-d"
+        turn1 = [
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "reply_1"},
+            {"role": "user", "content": "u2"},
+        ]
+        self._convert_and_apply(provider, turn1, sid)
+        # Turn 2 simulates ShapeHistory dropping reply_1 entirely (e.g. compacted)
+        turn2 = [
+            {"role": "user", "content": "[summary of earlier conversation]"},
+            {"role": "user", "content": "u3"},
+            {"role": "assistant", "content": "reply_2"},
+            {"role": "user", "content": "u4"},
+        ]
+        msgs = self._convert_and_apply(provider, turn2, sid)
+        # Prev marker not found -> fall back to basic marker on [-2] only
+        assert msgs[-2]["content"][-1].get("cache_control") is not None
 
 
 class TestUsageSplit:
