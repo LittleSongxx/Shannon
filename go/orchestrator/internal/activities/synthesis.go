@@ -2058,6 +2058,7 @@ func simpleSynthesisNoEvents(ctx context.Context, input SynthesisInput) (Synthes
 	totalOutputTokens := 0
 	totalCacheReadTokens := 0
 	totalCacheCreationTokens := 0
+	totalCacheCreation1hTokens := 0
 	var totalCostUsd float64
 	var modelUsed string
 	var provider string
@@ -2073,6 +2074,7 @@ func simpleSynthesisNoEvents(ctx context.Context, input SynthesisInput) (Synthes
 				totalOutputTokens += result.OutputTokens
 				totalCacheReadTokens += result.CacheReadTokens
 				totalCacheCreationTokens += result.CacheCreationTokens
+				totalCacheCreation1hTokens += result.CacheCreation1hTokens
 
 				// Capture model and provider from first successful agent
 				if modelUsed == "" && result.ModelUsed != "" {
@@ -2097,7 +2099,7 @@ func simpleSynthesisNoEvents(ctx context.Context, input SynthesisInput) (Synthes
 	// Estimate cost if not already calculated
 	if totalInputTokens > 0 && totalOutputTokens > 0 && modelUsed != "" {
 		totalCostUsd = pricing.CostForSplitWithCache(modelUsed, totalInputTokens, totalOutputTokens,
-			totalCacheReadTokens, totalCacheCreationTokens, 0, provider)
+			totalCacheReadTokens, totalCacheCreationTokens, totalCacheCreation1hTokens, provider)
 	}
 
 	logger.Info("Synthesis (simple) completed",
