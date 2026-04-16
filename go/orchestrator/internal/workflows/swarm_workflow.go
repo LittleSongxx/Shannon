@@ -471,8 +471,9 @@ type AgentLoopResult struct {
 	InputTokens         int    `json:"input_tokens"`
 	OutputTokens        int    `json:"output_tokens"`
 	CacheReadTokens     int    `json:"cache_read_tokens"`
-	CacheCreationTokens int    `json:"cache_creation_tokens"`
-	ModelUsed           string `json:"model_used"`
+	CacheCreationTokens   int    `json:"cache_creation_tokens"`
+	CacheCreation1hTokens int    `json:"cache_creation_1h_tokens"`
+	ModelUsed             string `json:"model_used"`
 	Provider            string `json:"provider"`
 	Success             bool                             `json:"success"`
 	Error               string                           `json:"error,omitempty"`
@@ -546,7 +547,7 @@ func AgentLoop(ctx workflow.Context, input AgentLoopInput) (AgentLoopResult, err
 
 	var history []activities.AgentLoopTurn
 	var totalTokens, totalInput, totalOutput int
-	var totalCacheRead, totalCacheCreation int
+	var totalCacheRead, totalCacheCreation, totalCacheCreation1h int
 	var lastModel, lastProvider string
 	var savedDoneResponse string // Preserved when "done" is converted to "idle"
 	var lastWorkspaceSeq uint64
@@ -606,7 +607,8 @@ func AgentLoop(ctx workflow.Context, input AgentLoopInput) (AgentLoopResult, err
 				InputTokens:         totalInput,
 				OutputTokens:        totalOutput,
 				CacheReadTokens:     totalCacheRead,
-				CacheCreationTokens: totalCacheCreation,
+				CacheCreationTokens:   totalCacheCreation,
+				CacheCreation1hTokens: totalCacheCreation1h,
 				ModelUsed:           lastModel,
 				Provider:            lastProvider,
 				Success:             true,
@@ -733,7 +735,8 @@ func AgentLoop(ctx workflow.Context, input AgentLoopInput) (AgentLoopResult, err
 				InputTokens:         totalInput,
 				OutputTokens:        totalOutput,
 				CacheReadTokens:     totalCacheRead,
-				CacheCreationTokens: totalCacheCreation,
+				CacheCreationTokens:   totalCacheCreation,
+				CacheCreation1hTokens: totalCacheCreation1h,
 				ModelUsed:           lastModel,
 				Provider:            lastProvider,
 				TeamKnowledge:       ft.Knowledge(),
@@ -772,7 +775,8 @@ func AgentLoop(ctx workflow.Context, input AgentLoopInput) (AgentLoopResult, err
 				InputTokens:         stepResult.InputTokens,
 				OutputTokens:        stepResult.OutputTokens,
 				CacheReadTokens:     stepResult.CacheReadTokens,
-				CacheCreationTokens: stepResult.CacheCreationTokens,
+				CacheCreationTokens:   stepResult.CacheCreationTokens,
+				CacheCreation1hTokens: 0, // AgentLoopStepResult doesn't carry per-TTL breakdown
 				CallSequence:        iteration, // Use Go iteration (per-agent), not Python global counter
 				Metadata:            map[string]interface{}{"workflow": "swarm", "phase": "agent_step", "iteration": iteration},
 			}).Get(ctx, nil)
@@ -821,7 +825,8 @@ func AgentLoop(ctx workflow.Context, input AgentLoopInput) (AgentLoopResult, err
 					InputTokens:         totalInput,
 					OutputTokens:        totalOutput,
 					CacheReadTokens:     totalCacheRead,
-					CacheCreationTokens: totalCacheCreation,
+					CacheCreationTokens:   totalCacheCreation,
+				CacheCreation1hTokens: totalCacheCreation1h,
 					ModelUsed:           lastModel,
 					Provider:     lastProvider,
 					Success:      true,
@@ -919,7 +924,8 @@ func AgentLoop(ctx workflow.Context, input AgentLoopInput) (AgentLoopResult, err
 				InputTokens:         totalInput,
 				OutputTokens:        totalOutput,
 				CacheReadTokens:     totalCacheRead,
-				CacheCreationTokens: totalCacheCreation,
+				CacheCreationTokens:   totalCacheCreation,
+				CacheCreation1hTokens: totalCacheCreation1h,
 				ModelUsed:           lastModel,
 				Provider:     lastProvider,
 				Success:      true,
@@ -1005,7 +1011,8 @@ func AgentLoop(ctx workflow.Context, input AgentLoopInput) (AgentLoopResult, err
 						InputTokens:         toolRes.InputTokens,
 						OutputTokens:        toolRes.OutputTokens,
 						CacheReadTokens:     toolRes.CacheReadTokens,
-						CacheCreationTokens: toolRes.CacheCreationTokens,
+						CacheCreationTokens:   toolRes.CacheCreationTokens,
+						CacheCreation1hTokens: toolRes.CacheCreation1hTokens,
 						CallSequence:        iteration, // Use Go iteration (per-agent)
 						Metadata:            map[string]interface{}{"workflow": "swarm", "phase": "tool_exec", "tool": stepResult.Tool},
 					}).Get(ctx, nil)
@@ -1052,6 +1059,7 @@ func AgentLoop(ctx workflow.Context, input AgentLoopInput) (AgentLoopResult, err
 				totalOutput += toolRes.OutputTokens
 				totalCacheRead += toolRes.CacheReadTokens
 				totalCacheCreation += toolRes.CacheCreationTokens
+			totalCacheCreation1h += toolRes.CacheCreation1hTokens
 			} else {
 				if isTransientError(toolErr) {
 					consecutiveTransientErrors++
@@ -1077,7 +1085,8 @@ func AgentLoop(ctx workflow.Context, input AgentLoopInput) (AgentLoopResult, err
 							InputTokens:         totalInput,
 							OutputTokens:        totalOutput,
 							CacheReadTokens:     totalCacheRead,
-							CacheCreationTokens: totalCacheCreation,
+							CacheCreationTokens:   totalCacheCreation,
+				CacheCreation1hTokens: totalCacheCreation1h,
 							ModelUsed:           lastModel,
 							Provider:            lastProvider,
 							TeamKnowledge:       ft.Knowledge(),
@@ -1353,7 +1362,8 @@ func AgentLoop(ctx workflow.Context, input AgentLoopInput) (AgentLoopResult, err
 					InputTokens:         totalInput,
 					OutputTokens:        totalOutput,
 					CacheReadTokens:     totalCacheRead,
-					CacheCreationTokens: totalCacheCreation,
+					CacheCreationTokens:   totalCacheCreation,
+				CacheCreation1hTokens: totalCacheCreation1h,
 					ModelUsed:           lastModel,
 					Provider:     lastProvider,
 					Success:      true,
@@ -1504,7 +1514,8 @@ func AgentLoop(ctx workflow.Context, input AgentLoopInput) (AgentLoopResult, err
 							InputTokens:         toolRes.InputTokens,
 							OutputTokens:        toolRes.OutputTokens,
 							CacheReadTokens:     toolRes.CacheReadTokens,
-							CacheCreationTokens: toolRes.CacheCreationTokens,
+							CacheCreationTokens:   toolRes.CacheCreationTokens,
+						CacheCreation1hTokens: toolRes.CacheCreation1hTokens,
 							CallSequence:        iteration, // Use Go iteration (per-agent)
 							Metadata:            map[string]interface{}{"workflow": "swarm", "phase": "tool_exec", "tool": toolName},
 						}).Get(ctx, nil)
@@ -1547,6 +1558,7 @@ func AgentLoop(ctx workflow.Context, input AgentLoopInput) (AgentLoopResult, err
 					totalOutput += toolRes.OutputTokens
 					totalCacheRead += toolRes.CacheReadTokens
 					totalCacheCreation += toolRes.CacheCreationTokens
+			totalCacheCreation1h += toolRes.CacheCreation1hTokens
 				} else {
 					if isTransientError(toolErr) {
 						consecutiveTransientErrors++
@@ -1572,7 +1584,8 @@ func AgentLoop(ctx workflow.Context, input AgentLoopInput) (AgentLoopResult, err
 								InputTokens:         totalInput,
 								OutputTokens:        totalOutput,
 								CacheReadTokens:     totalCacheRead,
-								CacheCreationTokens: totalCacheCreation,
+								CacheCreationTokens:   totalCacheCreation,
+				CacheCreation1hTokens: totalCacheCreation1h,
 								ModelUsed:           lastModel,
 								Provider:            lastProvider,
 								TeamKnowledge:       ft.Knowledge(),
@@ -1615,7 +1628,8 @@ func AgentLoop(ctx workflow.Context, input AgentLoopInput) (AgentLoopResult, err
 						InputTokens:         totalInput,
 						OutputTokens:        totalOutput,
 						CacheReadTokens:     totalCacheRead,
-						CacheCreationTokens: totalCacheCreation,
+						CacheCreationTokens:   totalCacheCreation,
+				CacheCreation1hTokens: totalCacheCreation1h,
 						ModelUsed:           lastModel,
 						Provider:     lastProvider,
 						Success:      false,
@@ -1668,7 +1682,8 @@ func AgentLoop(ctx workflow.Context, input AgentLoopInput) (AgentLoopResult, err
 				InputTokens:         totalInput,
 				OutputTokens:        totalOutput,
 				CacheReadTokens:     totalCacheRead,
-				CacheCreationTokens: totalCacheCreation,
+				CacheCreationTokens:   totalCacheCreation,
+				CacheCreation1hTokens: totalCacheCreation1h,
 				ModelUsed:           lastModel,
 				Provider:     lastProvider,
 				Success:      true,
@@ -1706,7 +1721,8 @@ func AgentLoop(ctx workflow.Context, input AgentLoopInput) (AgentLoopResult, err
 		InputTokens:         totalInput,
 		OutputTokens:        totalOutput,
 		CacheReadTokens:     totalCacheRead,
-		CacheCreationTokens: totalCacheCreation,
+		CacheCreationTokens:   totalCacheCreation,
+				CacheCreation1hTokens: totalCacheCreation1h,
 		ModelUsed:           lastModel,
 		Provider:            lastProvider,
 		Success:             true,
@@ -1924,7 +1940,8 @@ func SwarmWorkflow(ctx workflow.Context, input TaskInput) (TaskResult, error) {
 				InputTokens:         planDecision.InputTokens,
 				OutputTokens:        planDecision.OutputTokens,
 				CacheReadTokens:     planDecision.CacheReadTokens,
-				CacheCreationTokens: planDecision.CacheCreationTokens,
+				CacheCreationTokens:   planDecision.CacheCreationTokens,
+				CacheCreation1hTokens: 0, // LeadDecisionResult doesn't carry per-TTL breakdown
 				CallSequence:        planDecision.CallSequence,
 				Metadata:            map[string]interface{}{"workflow": "swarm", "phase": "initial_plan"},
 			}).Get(ctx, nil)
@@ -2976,7 +2993,8 @@ func SwarmWorkflow(ctx workflow.Context, input TaskInput) (TaskResult, error) {
 					InputTokens:         decision.InputTokens,
 					OutputTokens:        decision.OutputTokens,
 					CacheReadTokens:     decision.CacheReadTokens,
-					CacheCreationTokens: decision.CacheCreationTokens,
+					CacheCreationTokens:   decision.CacheCreationTokens,
+					CacheCreation1hTokens: 0, // LeadDecisionResult doesn't carry per-TTL breakdown
 					CallSequence:        decision.CallSequence,
 					Metadata:            map[string]interface{}{"workflow": "swarm", "phase": "lead_decision"},
 				}).Get(ctx, nil)
@@ -3774,7 +3792,8 @@ synthesis:
 				InputTokens:         closingDecision.InputTokens,
 				OutputTokens:        closingDecision.OutputTokens,
 				CacheReadTokens:     closingDecision.CacheReadTokens,
-				CacheCreationTokens: closingDecision.CacheCreationTokens,
+				CacheCreationTokens:   closingDecision.CacheCreationTokens,
+				CacheCreation1hTokens: 0, // LeadDecisionResult doesn't carry per-TTL breakdown
 				CallSequence:        closingDecision.CallSequence,
 				Metadata:            map[string]interface{}{"workflow": "swarm", "phase": "closing_decision"},
 			}).Get(ctx, nil)
@@ -4111,7 +4130,7 @@ func buildSwarmMetadata(results map[string]AgentLoopResult) map[string]interface
 		totalCacheCreation += r.CacheCreationTokens
 		totalCost += pricing.CostForSplitWithCache(
 			r.ModelUsed, r.InputTokens, r.OutputTokens,
-			r.CacheReadTokens, r.CacheCreationTokens, r.Provider,
+			r.CacheReadTokens, r.CacheCreationTokens, r.CacheCreation1hTokens, r.Provider,
 		)
 	}
 
