@@ -97,9 +97,10 @@ type AgentExecutionResult struct {
 	Provider            string
 	InputTokens         int
 	OutputTokens        int
-	CacheReadTokens     int `json:"cache_read_tokens,omitempty"`
-	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
-	CallSequence        int `json:"call_sequence,omitempty"`
+	CacheReadTokens       int `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens   int `json:"cache_creation_tokens,omitempty"`
+	CacheCreation1hTokens int `json:"cache_creation_1h_tokens,omitempty"`
+	CallSequence          int `json:"call_sequence,omitempty"`
 	DurationMs          int64
 	Success             bool
 	Error               string

@@ -1379,6 +1379,7 @@ func executeAgentCore(ctx context.Context, input AgentExecutionInput, logger *za
 		costUsd := 0.0
 		cacheReadTokens := 0
 		cacheCreationTokens := 0
+		cacheCreation1hTokens := 0
 		toolsUsed := []string{}
 		toolExecs := []ToolExecution{}
 		success := true
@@ -1435,6 +1436,9 @@ func executeAgentCore(ctx context.Context, input AgentExecutionInput, logger *za
 						}
 						if v, ok := parseFlexibleInt(m["cache_creation_tokens"]); ok {
 							cacheCreationTokens = v
+						}
+						if v, ok := parseFlexibleInt(m["cache_creation_1h_tokens"]); ok {
+							cacheCreation1hTokens = v
 						}
 					}
 				} else {
@@ -1598,7 +1602,7 @@ func executeAgentCore(ctx context.Context, input AgentExecutionInput, logger *za
 
 		if costUsd == 0 && (promptTokens > 0 || completionTokens > 0) {
 			costUsd = pricing.CostForSplitWithCache(model, promptTokens, completionTokens,
-				cacheReadTokens, cacheCreationTokens, 0, provider)
+				cacheReadTokens, cacheCreationTokens, cacheCreation1hTokens, provider)
 		} else if costUsd == 0 && tokens > 0 {
 			costUsd = pricing.CostForTokens(model, tokens)
 		}
@@ -1615,36 +1619,38 @@ func executeAgentCore(ctx context.Context, input AgentExecutionInput, logger *za
 				AgentID:    input.AgentID,
 				Message:    truncateQuery(out, MaxLLMOutputChars),
 				Payload: map[string]interface{}{
-					"tokens_used":   tokens,
-					"model_used":    model,
-					"provider":      provider,
-					"input_tokens":  promptTokens,
-					"output_tokens": completionTokens,
-					"cost_usd":      costUsd,
-					"duration_ms":   duration,
-					"role":          role,
+					"tokens_used":              tokens,
+					"model_used":               model,
+					"provider":                 provider,
+					"input_tokens":             promptTokens,
+					"output_tokens":            completionTokens,
+					"cost_usd":                 costUsd,
+					"duration_ms":              duration,
+					"role":                     role,
+					"cache_creation_1h_tokens": cacheCreation1hTokens,
 				},
 				Timestamp: time.Now(),
 			})
 		}
 
 		return AgentExecutionResult{
-			AgentID:             input.AgentID,
-			Role:                role,
-			Response:            out,
-			TokensUsed:          tokens,
-			ModelUsed:           model,
-			Provider:            provider,
-			InputTokens:         promptTokens,
-			OutputTokens:        completionTokens,
-			CacheReadTokens:     cacheReadTokens,
-			CacheCreationTokens: cacheCreationTokens,
-			DurationMs:          duration,
-			Success:             success,
-			Error:               "",
-			ToolsUsed:           toolsUsed,
-			ToolExecutions:      toolExecs,
-			ScreenshotPaths:     streamScreenshotPaths,
+			AgentID:               input.AgentID,
+			Role:                  role,
+			Response:              out,
+			TokensUsed:            tokens,
+			ModelUsed:             model,
+			Provider:              provider,
+			InputTokens:           promptTokens,
+			OutputTokens:          completionTokens,
+			CacheReadTokens:       cacheReadTokens,
+			CacheCreationTokens:   cacheCreationTokens,
+			CacheCreation1hTokens: cacheCreation1hTokens,
+			DurationMs:            duration,
+			Success:               success,
+			Error:                 "",
+			ToolsUsed:             toolsUsed,
+			ToolExecutions:        toolExecs,
+			ScreenshotPaths:       streamScreenshotPaths,
 		}, nil
 	}
 
@@ -1677,6 +1683,7 @@ func executeAgentCore(ctx context.Context, input AgentExecutionInput, logger *za
 		costUsd := 0.0
 		cacheReadTokens := 0
 		cacheCreationTokens := 0
+		cacheCreation1hTokens := 0
 
 		if mu := resp.GetMetrics(); mu != nil && mu.TokenUsage != nil {
 			tokens = int(mu.TokenUsage.TotalTokens)
@@ -1799,7 +1806,7 @@ func executeAgentCore(ctx context.Context, input AgentExecutionInput, logger *za
 
 		if costUsd == 0 && (promptTokens > 0 || completionTokens > 0) {
 			costUsd = pricing.CostForSplitWithCache(model, promptTokens, completionTokens,
-				cacheReadTokens, cacheCreationTokens, 0, provider)
+				cacheReadTokens, cacheCreationTokens, cacheCreation1hTokens, provider)
 		} else if costUsd == 0 && tokens > 0 {
 			costUsd = pricing.CostForTokens(model, tokens)
 		}
@@ -1822,14 +1829,15 @@ func executeAgentCore(ctx context.Context, input AgentExecutionInput, logger *za
 				AgentID:    input.AgentID,
 				Message:    truncateQuery(out, MaxLLMOutputChars),
 				Payload: map[string]interface{}{
-					"tokens_used":   tokens,
-					"model_used":    model,
-					"provider":      provider,
-					"input_tokens":  promptTokens,
-					"output_tokens": completionTokens,
-					"cost_usd":      costUsd,
-					"duration_ms":   duration,
-					"role":          role,
+					"tokens_used":              tokens,
+					"model_used":               model,
+					"provider":                 provider,
+					"input_tokens":             promptTokens,
+					"output_tokens":            completionTokens,
+					"cost_usd":                 costUsd,
+					"duration_ms":              duration,
+					"role":                     role,
+					"cache_creation_1h_tokens": cacheCreation1hTokens,
 				},
 				Timestamp: time.Now(),
 			})
@@ -1851,6 +1859,11 @@ func executeAgentCore(ctx context.Context, input AgentExecutionInput, logger *za
 				cacheCreationTokens = v
 			}
 		}
+		if resultMetadata != nil && cacheCreation1hTokens == 0 {
+			if v, ok := parseFlexibleInt(resultMetadata["cache_creation_1h_tokens"]); ok {
+				cacheCreation1hTokens = v
+			}
+		}
 
 		// Merge screenshot paths from metadata (Python agent loop persists screenshots
 		// and records paths in tool_execution_records — not in gRPC ToolResults)
@@ -1859,22 +1872,23 @@ func executeAgentCore(ctx context.Context, input AgentExecutionInput, logger *za
 		}
 
 		return AgentExecutionResult{
-			AgentID:             input.AgentID,
-			Role:                role,
-			Response:            out,
-			TokensUsed:          tokens,
-			ModelUsed:           model,
-			Provider:            provider,
-			InputTokens:         promptTokens,
-			OutputTokens:        completionTokens,
-			CacheReadTokens:     cacheReadTokens,
-			CacheCreationTokens: cacheCreationTokens,
-			DurationMs:          duration,
-			Success:             success,
-			Error:               errMsg,
-			ToolsUsed:           toolsUsed,
-			ToolExecutions:      toolExecs,
-			Metadata:            resultMetadata,
+			AgentID:               input.AgentID,
+			Role:                  role,
+			Response:              out,
+			TokensUsed:            tokens,
+			ModelUsed:             model,
+			Provider:              provider,
+			InputTokens:           promptTokens,
+			OutputTokens:          completionTokens,
+			CacheReadTokens:       cacheReadTokens,
+			CacheCreationTokens:   cacheCreationTokens,
+			CacheCreation1hTokens: cacheCreation1hTokens,
+			DurationMs:            duration,
+			Success:               success,
+			Error:                 errMsg,
+			ToolsUsed:             toolsUsed,
+			ToolExecutions:        toolExecs,
+			Metadata:              resultMetadata,
 			ScreenshotPaths:     screenshotPaths,
 		}, nil
 	}
@@ -2206,6 +2220,7 @@ func ExecuteAgentWithForcedTools(ctx context.Context, input AgentExecutionInput)
 	outputTokens := 0
 	cacheReadTokens := 0
 	cacheCreationTokens := 0
+	cacheCreation1hTokens := 0
 	if agentResponse.Metadata != nil {
 		if v, ok := agentResponse.Metadata["input_tokens"].(float64); ok {
 			inputTokens = int(v)
@@ -2218,6 +2233,9 @@ func ExecuteAgentWithForcedTools(ctx context.Context, input AgentExecutionInput)
 		}
 		if v, ok := agentResponse.Metadata["cache_creation_tokens"].(float64); ok {
 			cacheCreationTokens = int(v)
+		}
+		if v, ok := agentResponse.Metadata["cache_creation_1h_tokens"].(float64); ok {
+			cacheCreation1hTokens = int(v)
 		}
 	}
 
@@ -2301,7 +2319,7 @@ func ExecuteAgentWithForcedTools(ctx context.Context, input AgentExecutionInput)
 		var costUsd float64
 		if agentResponse.ModelUsed != "" && inputTokens > 0 && outputTokens > 0 {
 			costUsd = pricing.CostForSplitWithCache(agentResponse.ModelUsed, inputTokens, outputTokens,
-				cacheReadTokens, cacheCreationTokens, 0, agentResponse.Provider)
+				cacheReadTokens, cacheCreationTokens, cacheCreation1hTokens, agentResponse.Provider)
 		}
 
 		streaming.Get().Publish(wfID, streaming.Event{
@@ -2310,12 +2328,13 @@ func ExecuteAgentWithForcedTools(ctx context.Context, input AgentExecutionInput)
 			AgentID:    input.AgentID,
 			Message:    truncateQuery(agentResponse.Response, MaxLLMOutputChars),
 			Payload: map[string]interface{}{
-				"tokens_used":   agentResponse.TokensUsed,
-				"model_used":    agentResponse.ModelUsed,
-				"provider":      agentResponse.Provider,
-				"input_tokens":  inputTokens,
-				"output_tokens": outputTokens,
-				"cost_usd":      costUsd,
+				"tokens_used":              agentResponse.TokensUsed,
+				"model_used":               agentResponse.ModelUsed,
+				"provider":                 agentResponse.Provider,
+				"input_tokens":             inputTokens,
+				"output_tokens":            outputTokens,
+				"cost_usd":                 costUsd,
+				"cache_creation_1h_tokens": cacheCreation1hTokens,
 			},
 			Timestamp: time.Now(),
 		})
@@ -2433,21 +2452,22 @@ func ExecuteAgentWithForcedTools(ctx context.Context, input AgentExecutionInput)
 	}
 
 	return AgentExecutionResult{
-		AgentID:             input.AgentID,
-		Role:                role,
-		Success:             agentResponse.Success,
-		Response:            agentResponse.Response,
-		TokensUsed:          agentResponse.TokensUsed,
-		ModelUsed:           agentResponse.ModelUsed,
-		Provider:            agentResponse.Provider,
-		InputTokens:         inputTokens,
-		OutputTokens:        outputTokens,
-		CacheReadTokens:     cacheReadTokens,
-		CacheCreationTokens: cacheCreationTokens,
-		DurationMs:          time.Since(toolStartTime).Milliseconds(),
-		ToolsUsed:           toolsUsed,
-		ToolExecutions:      toolExecs,
-		Metadata:            agentResponse.Metadata,
+		AgentID:               input.AgentID,
+		Role:                  role,
+		Success:               agentResponse.Success,
+		Response:              agentResponse.Response,
+		TokensUsed:            agentResponse.TokensUsed,
+		ModelUsed:             agentResponse.ModelUsed,
+		Provider:              agentResponse.Provider,
+		InputTokens:           inputTokens,
+		OutputTokens:          outputTokens,
+		CacheReadTokens:       cacheReadTokens,
+		CacheCreationTokens:   cacheCreationTokens,
+		CacheCreation1hTokens: cacheCreation1hTokens,
+		DurationMs:            time.Since(toolStartTime).Milliseconds(),
+		ToolsUsed:             toolsUsed,
+		ToolExecutions:        toolExecs,
+		Metadata:              agentResponse.Metadata,
 		ScreenshotPaths:     screenshotPaths,
 	}, nil
 }

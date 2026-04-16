@@ -425,9 +425,10 @@ func (b *BudgetActivities) ExecuteAgentWithBudget(ctx context.Context, input Bud
 		Provider:       actualProvider,
 		InputTokens:         inputTokens,
 		OutputTokens:        outputTokens,
-		CacheReadTokens:     result.CacheReadTokens,
-		CacheCreationTokens: result.CacheCreationTokens,
-		IdempotencyKey:      idempotencyKey,
+		CacheReadTokens:       result.CacheReadTokens,
+		CacheCreationTokens:   result.CacheCreationTokens,
+		CacheCreation1hTokens: result.CacheCreation1hTokens,
+		IdempotencyKey:         idempotencyKey,
 	})
 
 	if err != nil {
