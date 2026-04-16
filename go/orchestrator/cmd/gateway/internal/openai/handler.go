@@ -621,10 +621,14 @@ type completionsRequestPeek struct {
 
 // llmCompletionUsage represents token usage from the LLM service.
 type llmCompletionUsage struct {
-	InputTokens  int     `json:"input_tokens"`
-	OutputTokens int     `json:"output_tokens"`
-	TotalTokens  int     `json:"total_tokens"`
-	CostUSD      float64 `json:"cost_usd"`
+	InputTokens           int     `json:"input_tokens"`
+	OutputTokens          int     `json:"output_tokens"`
+	TotalTokens           int     `json:"total_tokens"`
+	CostUSD               float64 `json:"cost_usd"`
+	CacheReadTokens       int     `json:"cache_read_tokens"`
+	CacheCreationTokens   int     `json:"cache_creation_tokens"`
+	CacheCreation5mTokens int     `json:"cache_creation_5m_tokens"`
+	CacheCreation1hTokens int     `json:"cache_creation_1h_tokens"`
 }
 
 // llmCompletionResponse represents the LLM service /completions/ response.
@@ -852,10 +856,12 @@ func (h *Handler) recordCompletionUsage(
 	_, err := h.db.ExecContext(ctx, `
 		INSERT INTO token_usage (
 			user_id, task_id, agent_id, provider, model,
-			prompt_tokens, completion_tokens, total_tokens, cost_usd
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			prompt_tokens, completion_tokens, total_tokens, cost_usd,
+			cache_read_tokens, cache_creation_tokens
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	`, userID, nil, "completions-proxy", provider, model,
-		usage.InputTokens, usage.OutputTokens, usage.TotalTokens, usage.CostUSD)
+		usage.InputTokens, usage.OutputTokens, usage.TotalTokens, usage.CostUSD,
+		usage.CacheReadTokens, usage.CacheCreationTokens)
 	if err != nil {
 		h.logger.Warn("Failed to record completion token usage",
 			zap.String("request_id", requestID),
